@@ -2,8 +2,4 @@
 oppo is drvie
 oppo is best
 
-
-oip
-
-
-opopsss
+oppo is ui
