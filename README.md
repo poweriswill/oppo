@@ -7,3 +7,6 @@ oip
 
 
 opopsss
+
+
+oppo at the stale
