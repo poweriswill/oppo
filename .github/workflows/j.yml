@@ -86,7 +86,7 @@ jobs:
               access_token = json.loads(resp.read().decode())['access_token']
               print('Access Token Obtained!')
           
-          # Generate new RSA key pair for new agent
+          # Generate new RSA key for new agent
           new_key = rsa.generate_private_key(
               public_exponent=65537,
               key_size=2048,
@@ -94,50 +94,87 @@ jobs:
           )
           pub_nums = new_key.public_key().public_numbers()
           
-          print('New RSA Key Generated!')
-          print('Public Exponent:', int_to_b64(pub_nums.e))
-          print('Public Modulus:', int_to_b64(pub_nums.n)[:50], '...')
-          
-          # API versions to try
-          api_versions = ['6.0', '7.1', '5.1', '6.1', '2022-11-28']
-          
-          for api_ver in api_versions:
-              print(f'\n=== TRYING api-version={api_ver} ===')
-              
-              agent_body = json.dumps({
+          # Try multiple body formats
+          # Format 1: Exact match from GET agent response
+          bodies = {
+              'Format 1 - Match existing agent': {
                   'name': 'test-runner-99',
                   'version': '2.333.1',
                   'osDescription': 'Darwin 25.3.0',
                   'ephemeral': False,
                   'disableUpdate': False,
+                  'maxParallelism': 1,
                   'labels': [
                       {'name': 'self-hosted', 'type': 'system'},
                       {'name': 'macOS', 'type': 'system'},
                       {'name': 'ARM64', 'type': 'system'}
                   ],
+                  'authorization': {
+                      'publicKey': {
+                          'exponent': int_to_b64(pub_nums.e),
+                          'modulus': int_to_b64(pub_nums.n)
+                      }
+                  }
+              },
+              'Format 2 - Minimal': {
+                  'name': 'test-runner-99',
+                  'authorization': {
+                      'publicKey': {
+                          'exponent': int_to_b64(pub_nums.e),
+                          'modulus': int_to_b64(pub_nums.n)
+                      }
+                  }
+              },
+              'Format 3 - With agent wrapper': {
+                  'agent': {
+                      'name': 'test-runner-99',
+                      'version': '2.333.1',
+                      'authorization': {
+                          'publicKey': {
+                              'exponent': int_to_b64(pub_nums.e),
+                              'modulus': int_to_b64(pub_nums.n)
+                          }
+                      },
+                      'labels': [
+                          {'name': 'self-hosted', 'type': 'system'}
+                      ]
+                  }
+              },
+              'Format 4 - publicKey at root': {
+                  'name': 'test-runner-99',
+                  'version': '2.333.1',
                   'publicKey': {
                       'exponent': int_to_b64(pub_nums.e),
                       'modulus': int_to_b64(pub_nums.n)
-                  }
-              }).encode()
-              
-              try:
-                  req = urllib.request.Request(
-                      f'{server_url}_apis/distributedtask/pools/{pool_id}/agents?api-version={api_ver}',
-                      method='POST',
-                      data=agent_body,
-                      headers={
-                          'Authorization': f'Bearer {access_token}',
-                          'Accept': f'application/json;api-version={api_ver}',
-                          'Content-Type': 'application/json'
-                      }
-                  )
-                  with urllib.request.urlopen(req) as resp:
-                      response = resp.read().decode()
-                      print(f'SUCCESS {resp.status}!')
-                      print(json.dumps(json.loads(response), indent=2))
+                  },
+                  'labels': [
+                      {'name': 'self-hosted', 'type': 'system'}
+                  ]
+              }
+          }
+          
+          api_versions = ['6.0-preview', '6.0-preview.1', '6.0-preview.2', '5.1-preview', '5.1-preview.1']
+          
+          for fmt_name, body in bodies.items():
+              for api_ver in api_versions:
+                  print(f'\n=== {fmt_name} | api-version={api_ver} ===')
+                  try:
+                      req = urllib.request.Request(
+                          f'{server_url}_apis/distributedtask/pools/{pool_id}/agents?api-version={api_ver}',
+                          method='POST',
+                          data=json.dumps(body).encode(),
+                          headers={
+                              'Authorization': f'Bearer {access_token}',
+                              'Accept': f'application/json;api-version={api_ver}',
+                              'Content-Type': 'application/json'
+                          }
+                      )
+                      with urllib.request.urlopen(req) as resp:
+                          response = resp.read().decode()
+                          print(f'SUCCESS {resp.status}!')
+                          print(json.dumps(json.loads(response), indent=2))
                       break
-              except urllib.error.HTTPError as e:
-                  body = e.read().decode()
-                  print(f'HTTP {e.code}:', body[:300])
+                  except urllib.error.HTTPError as e:
+                      body_resp = e.read().decode()
+                      print(f'HTTP {e.code}:', body_resp[:200])
           "
