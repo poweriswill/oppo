@@ -2,8 +2,6 @@
 oppo is drvie
 oppo is best
 
+oppo is ui
 
-oip
-
-
-opopsss
+oppo is youtube
